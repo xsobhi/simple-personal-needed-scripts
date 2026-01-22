@@ -89,5 +89,5 @@ Get-ChildItem -Filter *.mp3 -File | ForEach-Object {
     if ($file.Name -eq $newName) { return }
 
     $finalName = Get-UniqueName $file.DirectoryName $newName
-    Rename-Item $file.FullName $finalName
+    Rename-Item -LiteralPath $file.FullName -NewName $finalName
 }
