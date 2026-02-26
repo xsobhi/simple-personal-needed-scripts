@@ -1,11 +1,13 @@
 #requires -Version 5.1
 <#
-kill-nonessential-v5.ps1
+kill-nonessential-v7.ps1
 
-- Universal Gaming Laptop Version (ASUS + MSI)
-- Whitelists MSI Center, Dragon Center, SteelSeries, etc.
-- Whitelists ASUS G-Helper, Armoury Crate, etc.
-- Prompts user to SAVE WORK.
+- Strict Max-Performance Version
+- Whitelists MSI, ASUS, Gigabyte, ASRock, and major peripherals.
+- Closes ALL dev, creator, and background tools for maximum RAM/CPU freeing.
+- Gracefully attempts to close apps before forcing them.
+- Protects core Windows paths dynamically.
+- Includes Execution Transcript (Logging).
 #>
 
 param(
@@ -16,28 +18,25 @@ param(
   # Apps/Services containing these names will be SAVED (Case-insensitive)
   [string[]]$Whitelist = @(
     # --- ASUS / Zephyrus ---
-    "Armoury",      # ASUS Armoury Crate
-    "Asus",         # ASUS Optimization/Link/Framework
-    "GHelper",      # Popular lightweight alternative for Zephyrus
-    "Aura",         # ASUS Lighting
-
+    "Armoury", "Asus", "GHelper", "Aura",
+    
     # --- MSI ---
-    "MSI",          # MSI Center / MSI SDK
-    "Dragon",       # Dragon Center
-    "SteelSeries",  # MSI Keyboard/RGB Software
-    "Killer",       # Killer Intelligence Center (Network for MSI)
+    "MSI", "Dragon", "SteelSeries", "Killer", "Nahimic",
+    
+    # --- Gigabyte / AORUS ---
+    "Gigabyte", "Aorus", "RGBFusion", "AppCenter",
+    
+    # --- ASRock ---
+    "ASRock", "Polychrome", "A-Tuning",
+    
+    # --- Other Hardware / Peripherals ---
+    "Corsair", "iCUE", "NZXT", "CAM", "EVGA", "Precision", "Logitech", "LGHUB", "Razer", "Synapse",
     
     # --- Universal / Drivers ---
-    "Nvidia",       # GPU Drivers
-    "NvContainer",  # NVIDIA Container
-    "Amd",          # AMD CPU/GPU Drivers
-    "Radeon",       # AMD Graphics
-    "Realtek",      # Audio Drivers
-    "Dolby",        # Audio Effects
-    "Nahimic",      # Audio software (Common on MSI & ASUS)
-    "Thx"           # THX Spatial Audio (Common on Razer/MSI)
+    "Nvidia", "NvContainer", "Amd", "Radeon", "Realtek", "Dolby", "Thx"
   ),
 
+  # Services matching these names will be specifically TARGETED for stopping
   [string[]]$StopServiceNameLike = @(
     "nord", "nordvpn", "urban", "urbanvpn"
   ),
@@ -55,7 +54,7 @@ if (-not $PSBoundParameters.ContainsKey('StopThirdPartyServices')) {
 $IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $IsAdmin) {
-  Write-Host "Requesting administrative privileges..."
+  Write-Host "Requesting administrative privileges..." -ForegroundColor Cyan
   $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
   if ($WhatIf) { $argList += "-WhatIf" }
   if ($NoForce) { $argList += "-NoForce" }
@@ -68,35 +67,38 @@ if (-not $IsAdmin) {
   exit
 }
 
+# --- Logging ---
+$LogPath = "$env:TEMP\GameOptimizerLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+Start-Transcript -Path $LogPath -Append:$false | Out-Null
+
 # --- SAFETY CHECK: Warn User ---
 if (-not $WhatIf) {
     Clear-Host
     Write-Host "================================================================" -ForegroundColor Red
-    Write-Host "                         WARNING                                " -ForegroundColor Red
+    Write-Host "                        WARNING                                 " -ForegroundColor Red
     Write-Host "================================================================" -ForegroundColor Red
-    Write-Host " This script will forcefully close ALL non-essential applications"
-    Write-Host " and services to free up resources."
-    Write-Host ""
+    Write-Host " This script will aggressively close ALL non-essential apps,"
+    Write-Host " including dev environments (Python, Node) and editing software."
     Write-Host " PLEASE SAVE YOUR WORK NOW."
-    Write-Host " Any unsaved data in open applications may be lost."
     Write-Host "================================================================" -ForegroundColor Red
     Write-Host ""
     
     $confirmation = Read-Host " Do you want to continue? (Y/N)"
     if ($confirmation -notmatch "^[Yy]$") {
         Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+        Stop-Transcript | Out-Null
         exit
     }
 }
 
-# Conservative allowlist of Windows essentials
+# Core Windows processes and standard terminals so the script doesn't kill itself
 $Allow = @(
   "System","Idle","Registry","smss","csrss","wininit","services","lsass",
   "winlogon","svchost","fontdrvhost","dwm","explorer","taskhostw","sihost",
   "spoolsv","ctfmon","WmiPrvSE","audiodg","RuntimeBroker","SearchIndexer",
-  "dllhost","conhost","WUDFHost","SecurityHealthService",
+  "dllhost","conhost","WUDFHost","SecurityHealthService","smartscreen",
   "ShellExperienceHost","StartMenuExperienceHost","SearchHost","SystemSettings",
-  "ApplicationFrameHost","NisSrv","MsMpEng","SmartScreen"
+  "ApplicationFrameHost","NisSrv","MsMpEng","powershell_ise", "WindowsTerminal", "pwsh"
 )
 $Allow += (Get-Process -Id $PID).ProcessName
 
@@ -110,8 +112,9 @@ function Test-IsWhitelisted($Name, $DisplayName = "") {
     return $false
 }
 
-# --- Stop third-party services ---
+# --- 1. Stop Third-Party Services ---
 if ($StopThirdPartyServices) {
+  Write-Host "`nChecking Services..." -ForegroundColor Green
   $ServiceAllow = @(
     "RpcSs","DcomLaunch","PlugPlay","Power","EventLog","Schedule","SamSs",
     "Winmgmt","WlanSvc","Dhcp","Dnscache","NlaSvc","LanmanWorkstation",
@@ -129,11 +132,15 @@ if ($StopThirdPartyServices) {
       $path = ($s.PathName + "")
       $isWindowsPath = $path -match '(?i)\\Windows\\(System32|SysWOW64)\\'
       $isAllowed = $ServiceAllow -contains $name
-
-      # Check Whitelist
       $isWhitelisted = Test-IsWhitelisted -Name $name -DisplayName $disp
+      
+      # Check if this service is specifically targeted for death (e.g. VPNs)
+      $isLikeTarget = $false
+      foreach ($likeName in $StopServiceNameLike) {
+          if ($name -match $likeName -or $disp -match $likeName) { $isLikeTarget = $true; break }
+      }
 
-      if (-not $isAllowed -and -not $isWindowsPath -and -not $isWhitelisted) {
+      if ($isLikeTarget -or (-not $isAllowed -and -not $isWindowsPath -and -not $isWhitelisted)) {
         if ($WhatIf) {
           Write-Plan "Would stop service: $name ($disp)"
         } else {
@@ -150,25 +157,76 @@ if ($StopThirdPartyServices) {
   } catch { Write-Host "Service scan failed." }
 }
 
-# --- Kill non-allowlisted processes ---
+# --- 2. Kill Non-Allowlisted Processes ---
+Write-Host "`nChecking Processes..." -ForegroundColor Green
 $procs = Get-Process | Where-Object { $Allow -notcontains $_.ProcessName }
 
 foreach ($p in $procs) {
-  # Check Whitelist
+  # Skip if whitelisted
   if (Test-IsWhitelisted -Name $p.ProcessName -DisplayName $p.MainWindowTitle) {
       continue
   }
+
+  # Dynamic Windows Path Safety Check
+  $isWindowsProcess = $false
+  try {
+      if ($p.Path -match '(?i)\\Windows\\(System32|SysWOW64|WinSxS)\\') {
+          $isWindowsProcess = $true
+      }
+  } catch { 
+      # If we get Access Denied reading the path, it's highly likely a protected system process
+      $isWindowsProcess = $true 
+  }
+
+  if ($isWindowsProcess) { continue }
 
   if ($WhatIf) {
     Write-Plan "Would stop process: $($p.ProcessName) (Id $($p.Id))"
   } else {
     try {
-      Stop-Process -Id $p.Id -Force -ErrorAction Stop
-      Write-Host "Stopped process: $($p.ProcessName)"
+      # Graceful Close Attempt First
+      if ($p.MainWindowHandle -ne 0) {
+          Write-Host "Attempting to gracefully close $($p.ProcessName)..." -ForegroundColor DarkGray
+          $p.CloseMainWindow() | Out-Null
+          Start-Sleep -Seconds 1
+      }
+      
+      # Force Kill if it's still running
+      $p.Refresh()
+      if (-not $p.HasExited) {
+          Stop-Process -Id $p.Id -Force -ErrorAction Stop
+          Write-Host "Forcefully stopped process: $($p.ProcessName)"
+      } else {
+          Write-Host "Gracefully closed process: $($p.ProcessName)"
+      }
     } catch {
       Write-Host "Failed stopping $($p.ProcessName): $($_.Exception.Message)" -ForegroundColor Yellow
     }
   }
 }
 
-Write-Host "`nDone."
+# --- 3. Disable User Run Startup (Optional) ---
+if ($DisableUserRunStartup) {
+    Write-Host "`nChecking HKCU Startup Items..." -ForegroundColor Green
+    $runKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+    
+    try {
+        $startupItems = Get-ItemProperty $runKey -ErrorAction Stop | Get-Member -MemberType NoteProperty
+        foreach ($item in $startupItems) {
+            # Optionally, you could add whitelist checks here too before removing
+            if ($WhatIf) {
+                Write-Plan "Would remove startup item: $($item.Name)"
+            } else {
+                Remove-ItemProperty -Path $runKey -Name $item.Name -ErrorAction SilentlyContinue
+                Write-Host "Removed startup item: $($item.Name)"
+            }
+        }
+    } catch {
+        Write-Host "Could not read or edit startup registry key." -ForegroundColor Yellow
+    }
+}
+
+Write-Host "`nOptimization Complete." -ForegroundColor Green
+Write-Host "A log of stopped processes and services has been saved to: $LogPath" -ForegroundColor DarkGray
+
+Stop-Transcript | Out-Null
